@@ -1,7 +1,23 @@
-obs_locations:
-  longitudes_range_0_360: true  # set to true if longitudes are in the range 0 to 360 degrees
+observations:
+  latitude:
+    variable_name: "lat"  # name of the variable in the obs file
+  longitude:
+    variable_name: "lon"  # name of the variable in the obs file
+    range_0_360: true  # set to true if longitudes are in the range 0 to 360 degrees
+  sat_zenith_angle: 
+    variable_name: "sat_zen"  # name of the variable in the obs file
+    default_value: 0.0
+  sat_azimuth_angle:
+    variable_name: "sat_az"  # name of the variable in the obs file
+    default_value: 180.0
+  observation_time:
+    variable_name: "obs_time"  # name of the variable in the obs file
 
-model_grid_file: "/glade/work/swei/projects/hydrosat/tests/test_pmo/init.nc"
+
+model_grid: 
+  file: "/glade/work/swei/projects/hydrosat/tests/test_pmo/init.nc"
+
+
 RTTOV_path: "/glade/u/home/lkugler/work/compile/rttov132_intel/"  
 
 #factor_snow: 1  # fraction of QSNOW to be added to QICE (see Kostka et al. (2014) for more details)
@@ -16,7 +32,7 @@ instrument:
   channel_names_in_output: ["alpha", "beta", "gamma"]
   options: 
       StoreRad: False
-      Nthreads: 16
+      Nthreads: 64
       NprofsPerCall: 1024
       AddInterp: True
       AddSolar: False   # true with MFASIS

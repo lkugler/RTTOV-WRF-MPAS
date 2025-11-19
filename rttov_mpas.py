@@ -137,10 +137,10 @@ class MPAS_Data:
     """Class to hold model data for RTTOV processing
     """
     def __init__(self, ds, config): 
-        
-        self.grid_file = config['model_grid_file']
+        self.grid_file = config['model_grid']['file']
         self.nlevels = ds.sizes['nVertLevels']
         self.nCells = ds.sizes['nCells']
+        self.invalid_mask = None  # mask for invalid model points after interpolation to obs locations
         
         self.vars_3d = dict(
             p = (ds['pressure_base'] + ds['pressure_p'])/100,  # pressure  hPa
@@ -199,13 +199,13 @@ class MPAS_Data:
                 self.vars_2d[varname] = var.values[cellID_for_obs]
 
             # set model variables to nan where distance > max_distance_km
-            invalid_mask = (dist_km_approx > max_distance_km)
+            self.invalid_mask = (dist_km_approx > max_distance_km)
+            # set output to nan later at these points
         else:
             raise NotImplementedError('Only nearest neighbor interpolation is implemented.')
         
         t = time.time()-t
         print('interp_to_obs() took', int(t*10)/10., 's')
-        return invalid_mask  # set output to nan later at these points
         
 
     def get_sensible_temperature(self):
@@ -228,57 +228,145 @@ class MPAS_Data:
         """Reshape 2d variables to (-1,) for RTTOV processing
         """
         for varname, arr in self.vars_2d.items():
-            self.vars_2d[varname] = arr.reshape((-1,))
+            self.vars_2d[varname] = arr.values.reshape((-1,))
             
-            
+class ObsMetadata:
+    """Class to hold observation data for RTTOV processing
+    """
+    def __init__(self, filename, config, default_time=None):
+        self.lat = None
+        self.lon = None
+        self.satzen = None
+        self.satazi = None
+        self.obs_time = None
 
-def call_pyrttov(ds, dsobs, instrument, irAtlas, config):
+        if filename:
+            try:
+                dsobs = xr.open_dataset(filename, engine='netcdf4')
+            except:
+                # set all to default values
+                self.set_satazi_from_default(config)
+                self.set_satzen_from_default(config)
+                self.set_obs_time_from_default(default_time)
+            else:
+                # dsobs is successfully opened
+                try:
+                    self.lat = dsobs[config['observations']['latitude']['variable_name']].values.ravel()
+                except KeyError:
+                    warnings.warn(f"Latitude variable '{config['observations']['latitude']['variable_name']}' not found in observation file, get output on model grid.")
+                try:
+                    lon = dsobs[config['observations']['longitude']['variable_name']].values.ravel()
+                    if config['observations']['longitude'].get('range_0_360', False):
+                        # longitudes are in range 0 to 360 degrees, convert to -180 to 180
+                        lon = ((lon + 180.) % 360.) - 180.
+                    self.lon = lon
+                except KeyError:
+                    warnings.warn(f"Longitude variable '{config['observations']['longitude']['variable_name']}' not found in observation file, get output on model grid.")
+
+                # get satellite angles, use default values if not present
+                try:
+                    self.satzen = dsobs[config['observations']['sat_zenith_angle']['variable_name']].values.ravel()
+                except KeyError:
+                    warnings.warn(f"Satellite zenith angle variable '{config['observations']['sat_zenith_angle']['variable_name']}' not found in observation file, using default value.")
+                    self.set_satzen_from_default(config)
+                try:
+                    self.satazi = dsobs[config['observations']['sat_azimuth_angle']['variable_name']].values.ravel()
+                except KeyError:
+                    warnings.warn(f"Satellite azimuth angle variable '{config['observations']['sat_azimuth_angle']['variable_name']}' not found in observation file, using default value.")
+                    self.set_satazi_from_default(config)
+        
+                # get observation time, use default value if not present in obs file
+                try:
+                    self.obs_time = dsobs[config['observations']['observation_time']['variable_name']].values.ravel()
+                except KeyError:
+                    warnings.warn(f"Observation time variable '{config['observations']['observation_time']['variable_name']}' not found in observation file, using default value.")
+                    self.set_obs_time_from_default(default_time)
+                dsobs.close()
+        else:
+            self.set_obs_time_from_default(default_time)
+            self.set_satazi_from_default(config)
+            self.set_satzen_from_default(config)
+
+    def set_satzen_from_default(self, config):
+        self.satzen = np.full(1, config['observations']['sat_zenith_angle']['default_value'])
+        
+    def set_satazi_from_default(self, config):
+        self.satazi = np.full(1, config['observations']['sat_azimuth_angle']['default_value'])
+
+    def set_obs_time_from_default(self, default_time):
+        if default_time is None:
+            raise ValueError(f"Provide --obs_time.")
+        else:
+            self.obs_time = default_time
+            
+            
+class ModelGrid:
+    """Class to hold model grid data for RTTOV processing
+    """
+    def __init__(self, grid_file): 
+        with xr.open_dataset(grid_file, engine='netcdf4') as ds_model_grid:
+            self.lonC_rad = ds_model_grid['lonCell'].values.ravel()
+            self.latC_rad = ds_model_grid['latCell'].values.ravel()
+            self.nCells = ds_model_grid.sizes['nCells']
+            
+            # MPAS longitudes are in range 0 to 2pi radian
+            lonC_deg = np.rad2deg(self.lonC_rad)
+            self.lonC_deg = ((lonC_deg + 180.) % 360.) - 180.
+            self.latC_deg = np.rad2deg(self.latC_rad)
+    
+def call_pyrttov(ds, obs_md, instrument, irAtlas, config, default_time=None):
     """Run RTTOV, return xarray Dataset of reflectance or brightness temperature
     
     We read observation locations, times, and satellite angles from netcdf.
 
     Args:
         ds (xr.Dataset): instance returned by xr.open_dataset, select one time
-        dsobs (xr.Dataset): observation locations
-            contains 'lat', 'lon', 'satzen', 'satazi', 'obs_time' variables
         instrument (pyrttov.Instrument): instrument instance
         irAtlas (pyrttov.Atlas): IR atlas instance
         config (dict): configuration dictionary
+        obs_md (ObsMetadata, optional): observation metadata instance
+        default_time (dt.datetime, optional): default observation time if not in obs_md
 
     Returns:
         xr.Dataset: with RTTOV output variables
     """
     model = MPAS_Data(ds, config)
+    modelgrid = ModelGrid(config['model_grid']['file'])
     
-    # read obs dataset
-    # these variables are ('along_track', 'across_track')
-    n_across_track = dsobs.sizes['across_track']
-    lat = dsobs['lat'].values.ravel()
-    lon = dsobs['lon'].values.ravel()
-    satzen = dsobs['sat_zen'].values.ravel()
-    satazi = dsobs['sat_azim'].values.ravel()
+    need_to_interpolate = (obs_md.lat is not None) and (obs_md.lon is not None)
+    lon = obs_md.lon if obs_md.lon is not None else modelgrid.lonC_deg
+    lat = obs_md.lat if obs_md.lat is not None else modelgrid.latC_deg
+    nobs = len(lon)
     
-    if config['obs_locations'].get('longitudes_range_0_360', False):
-        # longitudes are in range 0 to 360 degrees, convert to -180 to 180
-        lon = ((lon + 180.) % 360.) - 180.
+    # make sure these are same len as lon/lat
+    satzen = obs_md.satzen if len(obs_md.satzen) == nobs else np.full(nobs, obs_md.satzen[0])
+    satazi = obs_md.satazi if len(obs_md.satazi) == nobs else np.full(nobs, obs_md.satazi[0])
 
-    # sub-second time information is irrelevant for RTTOV
-    obs_time = dsobs['obs_time'].values.astype('datetime64[s]').ravel()
-    assert satzen.shape == obs_time.shape, "Observation variables must have the same length."
+    if obs_md.obs_time is None:
+        obs_time = default_time  # take default from command line
+    else:
+        obs_time = obs_md.obs_time  # time info from obs file
+    assert obs_time is not None, "Either obs_md.obs_time or default_time must be provided."
+    obs_time = np.full(nobs, obs_time.astype('datetime64[s]'))
     
     nprofiles = len(obs_time)
+    assert len(lon) == nprofiles, "Length of lon must match number of profiles."
+    assert len(lat) == nprofiles, "Length of lat must match number of profiles."
+    assert len(satzen) == nprofiles, "Length of satzen must match number of profiles."
+    assert len(satazi) == nprofiles, "Length of satazi must match number of profiles."
     
-    # determine gridpoints closest to observation locations
-    obs_coords_deg = (lon, lat)
-    invalid_mask = model.interp_to_obs(obs_coords_deg, method='nearest', max_distance_km=15)
-    model.flip_vertical_dimension()  # RTTOV requires TOA-to-ground ordering
+    if need_to_interpolate:  # interpolate model to observation locations
+        obs_coords_deg = (lon, lat)
+        model.interp_to_obs(obs_coords_deg, method='nearest', max_distance_km=15)
 
-    # reshape variables without vertical dimension to (nprofiles, 1), RTTOV convention
-    model.reshape_2d_vars_for_rttov()
+        
+    # RTTOV convention
+    model.flip_vertical_dimension()  # RTTOV requires TOA-to-ground ordering
+    model.reshape_2d_vars_for_rttov()  # reshape variables without vertical dimension to (nprofiles, 1)
 
     ####### set up rttov class instance
     nlevels = model.nlevels
-    print('nlevels:', nlevels, 'nprofiles:', nprofiles)
+    print('compute RTTOV for nprofiles=', nprofiles, ' with nlevels=', nlevels)
     myProfiles = pyrttov.Profiles(nprofiles, nlevels)
 
     # surface data = lowest model level data
@@ -336,7 +424,7 @@ def call_pyrttov(ds, dsobs, instrument, irAtlas, config):
         massfraction_snow = model.vars_3d['cloud_snow'] / rttov_ice
     re_totalice =  (1 - massfraction_snow) * model.vars_3d['re_ice'] + \
                     massfraction_snow * model.vars_3d['re_snow']
-    re_totalice[rttov_ice_iszero] = 60.0  # default effective radius when ice mass is zero
+    re_totalice = np.where(rttov_ice_iszero, 60.0, re_totalice)  # default effective radius when ice mass is zero
     
     myProfiles.Icede = re_totalice  # microns effective diameter
 
@@ -402,9 +490,10 @@ def call_pyrttov(ds, dsobs, instrument, irAtlas, config):
 
     for i, name in enumerate(config["instrument"]['channel_names_in_output']):
         data = instrument.BtRefl[:,i].astype(np.float32)
-        data[invalid_mask] = np.nan  # model points too far from obs -> set to nan
+        if model.invalid_mask is not None:
+            data[model.invalid_mask] = np.nan  # model points too far from obs -> set to nan
         dsout[name] = (("obs",), data)
-    return dsout
+    return dsout.dropna("obs")
 
 
 ############## CONFIGURATION
@@ -423,7 +512,8 @@ def setup_instrument_atlas(config):
         print('Set instrument option:', key, 'to', value)
 
     try:
-        instrument.loadInst(config['instrument']['channel_numbers'])
+        numbers = [int(id) for name, id in config['instrument']['channel_numbers'].items()]
+        instrument.loadInst(numbers)
     except pyrttov.RttovError as e:
         sys.stderr.write("Error loading instrument(s): {!s}".format(e))
         sys.exit(1)
@@ -436,8 +526,19 @@ def setup_instrument_atlas(config):
 if __name__ == '__main__':
     """Apply RTTOV observation operators to MPAS model output
 
-    We do not run RTTOV on all MPAS model cells.
-    Instead, we run RTTOV for the observation locations only.
+    Two modes of operation:
+    1) If no observation grid is supplied, we run RTTOV on all MPAS model cells.
+    2) If supplied an observation grid, we run RTTOV for the observation locations only.
+    
+    The observation locations file must be a netcdf file with variables:
+        lat: latitude in degrees
+        lon: longitude in degrees
+        sat_zen (optional): satellite zenith angle in degrees
+        sat_azim (optional): satellite azimuth angle in degrees
+        obs_time (optional): observation time as np.datetime64 array
+            
+    If optional variables are not supplied, they will be taken from 
+    the configuration file.
 
     Usage: 
         python rttov_mpas.py <mpas_file> [--force]
@@ -464,16 +565,19 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Apply RTTOV to MPAS data')
     parser.add_argument('MPAS_file', type=str, help='path to MPAS file')
-    parser.add_argument('obs_locations_file', type=str, 
-                        help='path to netcdf file with observation locations')
     parser.add_argument('output', type=str, help='path to output file')
+    parser.add_argument('--obs_locations_file', type=str,
+                        help='path to netcdf file with observation locations, satellite angles, and times')
     parser.add_argument('--force', action='store_true', help='overwrite existing output')
+    parser.add_argument('--obs_time', type=str,
+                        help='default observation time if not in obs_locations_file, format YYYY-MM-DDTHH:MM:SS')
     args = parser.parse_args()
 
     f_in_obs = args.obs_locations_file
     f_in_model = args.MPAS_file
     f_out = args.output
     force = args.force
+    default_time = np.datetime64(dt.datetime.strptime(args.obs_time, '%Y-%m-%dT%H:%M:%S')).astype('datetime64[s]') if args.obs_time else None
     
     # # testing
     # f_in_obs = "/glade/work/lkugler/hydrosat/4p16s_3km/obs.2024050111.nc"
@@ -490,11 +594,12 @@ if __name__ == '__main__':
 
     t0 = time.time()
     ds_model = xr.open_dataset(f_in_model, engine='netcdf4')
-    ds_obs = xr.open_dataset(f_in_obs, engine='netcdf4')
     ds_model = ds_model.load()
 
+    obs_md = ObsMetadata(f_in_obs, config, default_time=default_time)
     instrument, irAtlas = setup_instrument_atlas(config)
-    dsout = call_pyrttov(ds_model, ds_obs, instrument, irAtlas, config)
+
+    dsout = call_pyrttov(ds_model, obs_md, instrument, irAtlas, config, default_time)
     ds_model.close()
     
     # add attributes
