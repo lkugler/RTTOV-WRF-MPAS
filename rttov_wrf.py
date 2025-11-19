@@ -6,8 +6,8 @@ import datetime as dt
 import xarray as xr
 from pysolar.solar import get_altitude, get_azimuth
 
-import paths
-path_RTTOV = paths.RTTOV
+import config_wrf
+path_RTTOV = config_wrf.RTTOV
 sys.path.append(path_RTTOV+'/wrapper')  # to ensure that pyrttov is importable
 import pyrttov
 

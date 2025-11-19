@@ -551,15 +551,14 @@ if __name__ == '__main__':
     """
     # read yaml config file
     import yaml
-    with open('config.yaml', 'r') as f:
+    with open('config_mpas.yaml', 'r') as f:
         config = yaml.safe_load(f)
 
     sys.path.append(config['RTTOV_path']+'/wrapper')
     try:
         import pyrttov
     except ImportError as e:
-        warnings.warn('RTTOV was compiled on DERECHO and fails from CASPER with error message: '+
-                      'libpmi.so.0: cannot open shared object file')
+        warnings.warn('Was RTTOV compiled on this exact machine?')
         raise e
 
     import argparse
@@ -579,12 +578,6 @@ if __name__ == '__main__':
     force = args.force
     default_time = np.datetime64(dt.datetime.strptime(args.obs_time, '%Y-%m-%dT%H:%M:%S')).astype('datetime64[s]') if args.obs_time else None
     
-    # # testing
-    # f_in_obs = "/glade/work/lkugler/hydrosat/4p16s_3km/obs.2024050111.nc"
-    # f_in_model = '/glade/work/swei/projects/hydrosat/tests/test_pmo/mpasout.nc'
-    # f_out = '/glade/work/lkugler/hydrosat/RTout/test.nc'
-    # force = True
-
     # do not run if output already exists
     if not force and os.path.isfile(f_out):
         print(f_out, 'already exists, not running RTTOV.')
