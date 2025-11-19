@@ -12,7 +12,9 @@ observations:
     default_value: 180.0
   observation_time:
     variable_name: "obs_time"  # name of the variable in the obs file
-
+  interp_model:
+    method: 'nearest'
+    max_distance_km: 15.0  # maximum horizontal distance for interpolation (in km)
 
 model_grid: 
   file: "/glade/work/swei/projects/hydrosat/tests/test_pmo/init.nc"

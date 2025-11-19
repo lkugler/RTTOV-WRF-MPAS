@@ -357,7 +357,9 @@ def call_pyrttov(ds, obs_md, instrument, irAtlas, config, default_time=None):
     
     if need_to_interpolate:  # interpolate model to observation locations
         obs_coords_deg = (lon, lat)
-        model.interp_to_obs(obs_coords_deg, method='nearest', max_distance_km=15)
+        model.interp_to_obs(obs_coords_deg, 
+                            method=config['observations']['interp_model']['method'],
+                            max_distance_km=config['observations']['interp_model']['max_distance_km'])
 
         
     # RTTOV convention
