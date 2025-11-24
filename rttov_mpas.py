@@ -477,7 +477,7 @@ def call_pyrttov(ds, obs_md, instrument, irAtlas, config, default_time=None):
         t = time.time()-t
         print('runDirect() took', int(t*10)/10., 's')
     except pyrttov.RttovError as e:
-        sys.stderr.write("Error running RTTOV direct model: {!s}".format(e))
+        raise RuntimeError("Error running RTTOV: {!s}".format(e))
 
     # print('output shape:', (instrument.BtRefl.shape))
     if instrument.RadQuality is not None:
